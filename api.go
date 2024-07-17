@@ -152,11 +152,14 @@ func (a *Api) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	if tokenData.Client != "" {
 		w.WriteHeader(403)
-		io.WriteString(w, "Token cannot be used to create users")
+		io.WriteString(w, "Token cannot be used to manage users")
 		return
 	}
 
 	switch r.Method {
+	case "GET":
+		users := a.GetUsers(tokenData, r.Form)
+		json.NewEncoder(w).Encode(users)
 	case "POST":
 		err := a.CreateUser(tokenData, r.Form)
 		if err != nil {
@@ -193,6 +196,9 @@ func (a *Api) handleTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.Method {
+	case "GET":
+		tokens := a.GetTokens(tokenData, r.Form)
+		json.NewEncoder(w).Encode(tokens)
 	case "POST":
 		r.ParseForm()
 		token, err := a.CreateToken(tokenData, r.Form)
@@ -204,7 +210,7 @@ func (a *Api) handleTokens(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, token)
 	default:
 		w.WriteHeader(405)
-		w.Write([]byte(err.Error()))
+		fmt.Fprintf(w, "Invalid method for /api/tokens")
 	}
 }
 
@@ -264,7 +270,7 @@ func (a *Api) handleClients(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		w.WriteHeader(405)
-		w.Write([]byte(err.Error()))
+		fmt.Fprintf(w, "Invalid method for /api/clients")
 	}
 }
 
@@ -443,28 +449,36 @@ func (a *Api) DeleteTunnel(tokenData TokenData, params url.Values) error {
 
 func (a *Api) CreateToken(tokenData TokenData, params url.Values) (string, error) {
 
-	owner := params.Get("owner")
-	if owner == "" {
+	ownerId := params.Get("owner")
+	if ownerId == "" {
 		return "", errors.New("Invalid owner paramater")
 	}
 
 	user, _ := a.db.GetUser(tokenData.Owner)
 
-	if tokenData.Owner != owner && !user.IsAdmin {
+	if tokenData.Owner != ownerId && !user.IsAdmin {
 		return "", errors.New("Unauthorized")
+	}
+
+	var owner User
+
+	if tokenData.Owner == ownerId {
+		owner = user
+	} else {
+		owner, _ = a.db.GetUser(ownerId)
 	}
 
 	client := params.Get("client")
 
 	if client != "any" {
-		if _, exists := user.Clients[client]; !exists {
-			return "", errors.New(fmt.Sprintf("Client %s does not exist for user %s", client, owner))
+		if _, exists := owner.Clients[client]; !exists {
+			return "", fmt.Errorf("Client %s does not exist for user %s", client, ownerId)
 		}
 	} else {
 		client = ""
 	}
 
-	token, err := a.db.AddToken(owner, client)
+	token, err := a.db.AddToken(ownerId, client)
 	if err != nil {
 		return "", errors.New("Failed to create token")
 	}
@@ -494,6 +508,35 @@ func (a *Api) DeleteToken(tokenData TokenData, params url.Values) error {
 
 	return nil
 
+}
+
+func (a *Api) GetTokens(tokenData TokenData, params url.Values) map[string]TokenData {
+
+	tokens := a.db.GetTokens()
+
+	user, _ := a.db.GetUser(tokenData.Owner)
+
+	for key, tok := range tokens {
+		if !user.IsAdmin && tok.Owner != tokenData.Owner {
+			delete(tokens, key)
+		}
+	}
+
+	return tokens
+}
+
+func (a *Api) GetUsers(tokenData TokenData, params url.Values) map[string]User {
+
+	user, _ := a.db.GetUser(tokenData.Owner)
+	users := a.db.GetUsers()
+
+	if user.IsAdmin {
+		return users
+	} else {
+		return map[string]User{
+			tokenData.Owner: user,
+		}
+	}
 }
 
 func (a *Api) CreateUser(tokenData TokenData, params url.Values) error {

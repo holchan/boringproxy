@@ -57,6 +57,7 @@ func Listen() {
 	acmeEmail := flagSet.String("acme-email", "", "Email for ACME (ie Let's Encrypt)")
 	acmeUseStaging := flagSet.Bool("acme-use-staging", false, "Use ACME (ie Let's Encrypt) staging servers")
 	acceptCATerms := flagSet.Bool("accept-ca-terms", false, "Automatically accept CA terms")
+	acmeCa := flagSet.String("acme-certificate-authority", "", "URI for ACME Certificate Authority")
 	err := flagSet.Parse(os.Args[2:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: parsing flags: %s\n", os.Args[0], err)
@@ -117,6 +118,10 @@ func Listen() {
 		certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
 	}
 
+	if *acmeCa != "" {
+		certmagic.DefaultACME.CA = *acmeCa
+	}
+
 	certConfig := certmagic.NewDefault()
 
 	if *newAdminDomain != "" {
@@ -153,11 +158,9 @@ func Listen() {
 	}
 
 	if *printLogin {
-		tokens := db.GetTokens()
-
-		for token, tokenData := range tokens {
-			if tokenData.Owner == "admin" {
-				printLoginInfo(token, db.GetAdminDomain())
+		for token, tokenData := range db.GetTokens() {
+			if tokenData.Owner == "admin" && tokenData.Client == "" {
+				printLoginInfo(token, db.GetAdminDomain(), *httpsPort)
 				break
 			}
 		}
@@ -439,9 +442,13 @@ func prompt(promptText string) string {
 	return strings.TrimSpace(text)
 }
 
-func printLoginInfo(token, adminDomain string) {
-	log.Println("Admin token: " + token)
-	url := fmt.Sprintf("https://%s/login?access_token=%s", adminDomain, token)
+func printLoginInfo(token, adminDomain string, httpsPort int) {
+	var url string
+	if httpsPort != 443 {
+		url = fmt.Sprintf("https://%s:%d/login?access_token=%s", adminDomain, httpsPort, token)
+	} else {
+		url = fmt.Sprintf("https://%s/login?access_token=%s", adminDomain, token)
+	}
 	log.Println(fmt.Sprintf("Admin login link: %s", url))
 	qrterminal.GenerateHalfBlock(url, qrterminal.L, os.Stdout)
 }

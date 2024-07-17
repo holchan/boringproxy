@@ -29,6 +29,7 @@ type Client struct {
 	cancelFuncsMutex *sync.Mutex
 	certConfig       *certmagic.Config
 	behindProxy      bool
+	pollInterval     int
 }
 
 type ClientConfig struct {
@@ -39,8 +40,10 @@ type ClientConfig struct {
 	CertDir        string `json:"certDir,omitempty"`
 	AcmeEmail      string `json:"acmeEmail,omitempty"`
 	AcmeUseStaging bool   `json:"acmeUseStaging,omitempty"`
+	AcmeCa         string `json:"acmeCa,omitempty"`
 	DnsServer      string `json:"dnsServer,omitempty"`
 	BehindProxy    bool   `json:"behindProxy,omitempty"`
+	PollInterval   int    `json:"pollInterval,omitempty"`
 }
 
 func NewClient(config *ClientConfig) (*Client, error) {
@@ -84,6 +87,10 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		certmagic.DefaultACME.CA = certmagic.LetsEncryptStagingCA
 	}
 
+	if config.AcmeCa != "" {
+		certmagic.DefaultACME.CA = config.AcmeCa
+	}
+
 	certConfig := certmagic.NewDefault()
 
 	httpClient := &http.Client{
@@ -108,6 +115,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 		cancelFuncsMutex: cancelFuncsMutex,
 		certConfig:       certConfig,
 		behindProxy:      config.BehindProxy,
+		pollInterval:     config.PollInterval,
 	}, nil
 }
 
@@ -120,25 +128,38 @@ func (c *Client) Run(ctx context.Context) error {
 
 	clientReq, err := http.NewRequest("POST", url, nil)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Failed to create request for URL %s", url))
+		return fmt.Errorf("Failed to create request for URL %s", url)
 	}
 	if len(c.token) > 0 {
 		clientReq.Header.Add("Authorization", "bearer "+c.token)
 	}
 	resp, err := c.httpClient.Do(clientReq)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Failed to create client. Ensure the server is running. URL: %s", url))
+		return fmt.Errorf("Failed to create client. Ensure the server is running. URL: %s", url)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Failed to create client. HTTP Status code: %d. Failed to read body", resp.StatusCode))
+			return fmt.Errorf("Failed to create client. HTTP Status code: %d. Failed to read body", resp.StatusCode)
 		}
 
 		msg := string(body)
-		return errors.New(fmt.Sprintf("Failed to create client. Are the user ('%s') and token correct? HTTP Status code: %d. Message: %s", c.user, resp.StatusCode, msg))
+		return fmt.Errorf("Failed to create client. Are the user ('%s') and token correct? HTTP Status code: %d. Message: %s", c.user, resp.StatusCode, msg)
+	}
+
+	pollChan := make(chan struct{})
+
+	// A polling interval of 0 disables polling. Basically pollChan will
+	// remain blocked and never trigger in the select below.
+	if c.pollInterval > 0 {
+		go func() {
+			for {
+				<-time.After(time.Duration(c.pollInterval) * time.Millisecond)
+				pollChan <- struct{}{}
+			}
+		}()
 	}
 
 	for {
@@ -150,7 +171,7 @@ func (c *Client) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(2 * time.Second):
+		case <-pollChan:
 			// continue
 		}
 	}
@@ -261,7 +282,7 @@ func (c *Client) BoreTunnel(ctx context.Context, tunnel Tunnel) error {
 
 	signer, err := ssh.ParsePrivateKey([]byte(tunnel.TunnelPrivateKey))
 	if err != nil {
-		return errors.New(fmt.Sprintf("Unable to parse private key: %v", err))
+		return fmt.Errorf("Unable to parse private key: %v", err)
 	}
 
 	//var hostKey ssh.PublicKey
@@ -276,10 +297,9 @@ func (c *Client) BoreTunnel(ctx context.Context, tunnel Tunnel) error {
 	}
 
 	sshHost := fmt.Sprintf("%s:%d", tunnel.ServerAddress, tunnel.ServerPort)
-	fmt.Println(sshHost)
 	client, err := ssh.Dial("tcp", sshHost, config)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Failed to dial: ", err))
+		return fmt.Errorf("Failed to dial: %v", err)
 	}
 	defer client.Close()
 
@@ -290,7 +310,7 @@ func (c *Client) BoreTunnel(ctx context.Context, tunnel Tunnel) error {
 	tunnelAddr := fmt.Sprintf("%s:%d", bindAddr, tunnel.TunnelPort)
 	listener, err := client.Listen("tcp", tunnelAddr)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Unable to register tcp forward for %s:%d %v", bindAddr, tunnel.TunnelPort, err))
+		return fmt.Errorf("Unable to register tcp forward for %s:%d %v", bindAddr, tunnel.TunnelPort, err)
 	}
 	defer listener.Close()
 
